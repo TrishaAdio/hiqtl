@@ -197,8 +197,8 @@ def build_client(account):
     )
 
 
-def ask_int(prompt, current, lo, hi):
-    raw = questionary.text(f"{prompt} [{current}]:").ask()
+async def ask_int(prompt, current, lo, hi):
+    raw = await questionary.text(f"{prompt} [{current}]:").ask_async()
     if raw is None or raw.strip() == "":
         return current
     try:
@@ -219,9 +219,9 @@ async def add_account(config):
     console.print(Panel("Add Telegram Account", style="cyan"))
     info("Get your API ID / API Hash from https://my.telegram.org -> API development tools")
 
-    api_id = questionary.text("API ID:").ask()
-    api_hash = questionary.text("API Hash:").ask()
-    phone = questionary.text("Phone number (with country code, e.g. +15551234567):").ask()
+    api_id = await questionary.text("API ID:").ask_async()
+    api_hash = await questionary.text("API Hash:").ask_async()
+    phone = await questionary.text("Phone number (with country code, e.g. +15551234567):").ask_async()
 
     if not (api_id and api_hash and phone):
         warn("Cancelled — missing input.")
@@ -245,12 +245,12 @@ async def add_account(config):
         else:
             await client.send_code_request(phone)
             info("A login code was sent to your Telegram app.")
-            code = questionary.text("Enter the code:").ask()
+            code = await questionary.text("Enter the code:").ask_async()
             try:
                 await client.sign_in(phone, code.strip())
             except SessionPasswordNeededError:
                 info("Two-step verification is enabled on this account.")
-                password = questionary.password("Enter your 2FA password:").ask()
+                password = await questionary.password("Enter your 2FA password:").ask_async()
                 await client.sign_in(password=password)
 
         me = await client.get_me()
@@ -318,16 +318,16 @@ async def remove_account(config):
         warn("No accounts to remove.")
         return
 
-    phone = questionary.select(
+    phone = await questionary.select(
         "Select an account to remove:",
         choices=list(accounts.keys()) + [Choice("Cancel", value=None)],
-    ).ask()
+    ).ask_async()
     if not phone:
         return
 
-    if not questionary.confirm(
+    if not await questionary.confirm(
         f"Remove {phone} and delete its local session file?", default=False
-    ).ask():
+    ).ask_async():
         return
 
     session_file = session_path_for(phone) + ".session"
@@ -366,7 +366,7 @@ async def manage_ads(config):
         else:
             info("No ads saved yet. Use /savead in Saved Messages, or add one here.")
 
-        action = questionary.select(
+        action = await questionary.select(
             "Ad actions:",
             choices=[
                 Choice("Add a text ad", value="add"),
@@ -374,12 +374,12 @@ async def manage_ads(config):
                 Choice("Remove an ad", value="remove"),
                 Choice("Back", value="back"),
             ],
-        ).ask()
+        ).ask_async()
 
         if action in (None, "back"):
             return
         if action == "add":
-            content = questionary.text("Ad text:").ask()
+            content = await questionary.text("Ad text:").ask_async()
             if content and content.strip():
                 ads.append({"kind": "text", "content": content.strip(),
                             "added": datetime.now().isoformat()})
@@ -390,14 +390,14 @@ async def manage_ads(config):
             if not text_ads:
                 warn("No editable text ads.")
                 continue
-            idx = questionary.select(
+            idx = await questionary.select(
                 "Which ad?",
                 choices=[Choice(_ad_preview(a), value=i) for i, a in text_ads]
                 + [Choice("Cancel", value=None)],
-            ).ask()
+            ).ask_async()
             if idx is None:
                 continue
-            new = questionary.text("New text:", default=ads[idx]["content"]).ask()
+            new = await questionary.text("New text:", default=ads[idx]["content"]).ask_async()
             if new and new.strip():
                 ads[idx]["content"] = new.strip()
                 save_config(config)
@@ -405,11 +405,11 @@ async def manage_ads(config):
         elif action == "remove":
             if not ads:
                 continue
-            idx = questionary.select(
+            idx = await questionary.select(
                 "Remove which ad?",
                 choices=[Choice(_ad_preview(a), value=i) for i, a in enumerate(ads)]
                 + [Choice("Cancel", value=None)],
-            ).ask()
+            ).ask_async()
             if idx is None:
                 continue
             ads.pop(idx)
@@ -423,7 +423,7 @@ async def manage_ads(config):
 async def edit_settings(config):
     while True:
         console.print(Panel("Settings", style="cyan"))
-        section = questionary.select(
+        section = await questionary.select(
             "What do you want to change?",
             choices=[
                 Choice("Timing (rounds / delays)", value="timing"),
@@ -431,7 +431,7 @@ async def edit_settings(config):
                 Choice("Toggle listener features", value="features"),
                 Choice("Back", value="back"),
             ],
-        ).ask()
+        ).ask_async()
 
         if section in (None, "back"):
             return
@@ -439,31 +439,31 @@ async def edit_settings(config):
         if section == "timing":
             s = config["settings"]
             info("Rounds: how many times to repeat the whole broadcast.")
-            s["rounds"] = ask_int("Rounds", s["rounds"], 1, 100)
+            s["rounds"] = await ask_int("Rounds", s["rounds"], 1, 100)
             info("Delay between messages: courtesy pause after each send (helps avoid rate limits).")
-            s["delay_between_messages"] = ask_int(
+            s["delay_between_messages"] = await ask_int(
                 "Delay between messages (seconds)", s["delay_between_messages"], 0, 3600)
             info("Delay between rounds: pause before repeating the whole broadcast.")
-            s["delay_between_rounds"] = ask_int(
+            s["delay_between_rounds"] = await ask_int(
                 "Delay between rounds (seconds)", s["delay_between_rounds"], 0, 86400)
-            s["jitter"] = questionary.confirm(
-                "Add small random jitter to message delay?", default=s["jitter"]).ask()
+            s["jitter"] = await questionary.confirm(
+                "Add small random jitter to message delay?", default=s["jitter"]).ask_async()
             info("Auto-reply cooldown: minimum time before replying to the same person again.")
-            s["autoreply_cooldown"] = ask_int(
+            s["autoreply_cooldown"] = await ask_int(
                 "Auto-reply cooldown (seconds)", s["autoreply_cooldown"], 0, 604800)
             info("DM self-alert count: how many notifications to push to YOUR OWN Saved "
                  "Messages when someone DMs, so the pings get you online.")
-            s["dm_alert_count"] = ask_int("DM self-alert count", s["dm_alert_count"], 1, 50)
+            s["dm_alert_count"] = await ask_int("DM self-alert count", s["dm_alert_count"], 1, 50)
             info("DM self-alert delay: seconds between those self-notifications (2+ is flood-safe).")
-            s["dm_alert_delay"] = ask_int("DM self-alert delay (seconds)", s["dm_alert_delay"], 0, 60)
+            s["dm_alert_delay"] = await ask_int("DM self-alert delay (seconds)", s["dm_alert_delay"], 0, 60)
             info("DM self-alert cooldown: min gap before alerting again for the same sender.")
-            s["dm_alert_cooldown"] = ask_int("DM self-alert cooldown (seconds)", s["dm_alert_cooldown"], 0, 86400)
+            s["dm_alert_cooldown"] = await ask_int("DM self-alert cooldown (seconds)", s["dm_alert_cooldown"], 0, 86400)
             save_config(config)
             ok("Timing saved.")
 
         elif section == "texts":
             t = config["texts"]
-            key = questionary.select(
+            key = await questionary.select(
                 "Which text?",
                 choices=[
                     Choice("DM auto-reply message", value="dm_autoreply"),
@@ -471,10 +471,10 @@ async def edit_settings(config):
                     Choice("Saved-ad confirmation", value="savead_confirm"),
                     Choice("Back", value=None),
                 ],
-            ).ask()
+            ).ask_async()
             if key is None:
                 continue
-            new = questionary.text("New text:", default=t[key]).ask()
+            new = await questionary.text("New text:", default=t[key]).ask_async()
             if new is not None:
                 t[key] = new
                 save_config(config)
@@ -482,16 +482,16 @@ async def edit_settings(config):
 
         elif section == "features":
             f = config["features"]
-            f["savead_enabled"] = questionary.confirm(
-                "Watch Saved Messages for /savead?", default=f["savead_enabled"]).ask()
-            f["capture_mentions_enabled"] = questionary.confirm(
+            f["savead_enabled"] = await questionary.confirm(
+                "Watch Saved Messages for /savead?", default=f["savead_enabled"]).ask_async()
+            f["capture_mentions_enabled"] = await questionary.confirm(
                 "Save messages that tag the account (in groups)?",
-                default=f["capture_mentions_enabled"]).ask()
-            f["dm_autoreply_enabled"] = questionary.confirm(
-                "Auto-reply once to incoming DMs?", default=f["dm_autoreply_enabled"]).ask()
-            f["dm_alert_enabled"] = questionary.confirm(
+                default=f["capture_mentions_enabled"]).ask_async()
+            f["dm_autoreply_enabled"] = await questionary.confirm(
+                "Auto-reply once to incoming DMs?", default=f["dm_autoreply_enabled"]).ask_async()
+            f["dm_alert_enabled"] = await questionary.confirm(
                 "Push self-alerts to your own Saved Messages on a DM?",
-                default=f["dm_alert_enabled"]).ask()
+                default=f["dm_alert_enabled"]).ask_async()
             save_config(config)
             ok("Features saved.")
 
@@ -558,10 +558,10 @@ async def forward_messages(config):
         warn("No ads saved. Use /savead in Saved Messages, or 'Manage Ads'.")
         return
 
-    phone = questionary.select(
+    phone = await questionary.select(
         "Post from which account?",
         choices=list(accounts.keys()) + [Choice("Cancel", value=None)],
-    ).ask()
+    ).ask_async()
     if not phone:
         return
 
@@ -573,11 +573,11 @@ async def forward_messages(config):
             return
 
         # --- choose which ads to send ---
-        ad_choice = questionary.checkbox(
+        ad_choice = await questionary.checkbox(
             "Select the ads to post (space to toggle, enter to confirm):",
             choices=[Choice(_ad_preview(a), value=i, checked=True)
                      for i, a in enumerate(config["ads"])],
-        ).ask()
+        ).ask_async()
         if not ad_choice:
             warn("No ads selected. Aborting.")
             return
@@ -598,10 +598,10 @@ async def forward_messages(config):
             choices.append(Choice(title=label, value=c["id"],
                                   disabled=None if c["can_post"] else "cannot post"))
 
-        selected_ids = questionary.checkbox(
+        selected_ids = await questionary.checkbox(
             "Select the destination chats (space to toggle, enter to confirm):",
             choices=choices,
-        ).ask()
+        ).ask_async()
         if not selected_ids:
             warn("No destinations selected. Aborting.")
             return
@@ -610,14 +610,14 @@ async def forward_messages(config):
         s = config["settings"]
         console.print(Panel("Timing for this run", style="yellow"))
         info("Rounds: how many times to repeat the entire broadcast. Use 1 for a single pass.")
-        rounds = ask_int("Rounds", s["rounds"], 1, 100)
+        rounds = await ask_int("Rounds", s["rounds"], 1, 100)
         info("Delay between messages: seconds to wait after each send. A few seconds "
              "keeps you well under Telegram's limits and looks natural.")
-        base_delay = ask_int("Delay between messages (seconds)", s["delay_between_messages"], 0, 3600)
+        base_delay = await ask_int("Delay between messages (seconds)", s["delay_between_messages"], 0, 3600)
         round_delay = 0
         if rounds > 1:
             info("Delay between rounds: seconds to wait before repeating the whole broadcast.")
-            round_delay = ask_int("Delay between rounds (seconds)", s["delay_between_rounds"], 0, 86400)
+            round_delay = await ask_int("Delay between rounds (seconds)", s["delay_between_rounds"], 0, 86400)
 
         id_to_title = {c["id"]: c["title"] for c in chats}
         total = len(selected_ids) * len(selected_ads) * rounds
@@ -630,7 +630,7 @@ async def forward_messages(config):
             f"  |  round delay: [cyan]{round_delay}s[/cyan]\n"
             f"Total posts: [cyan]{total}[/cyan]",
             title="Confirm broadcast", style="yellow"))
-        if not questionary.confirm("Proceed?", default=False).ask():
+        if not await questionary.confirm("Proceed?", default=False).ask_async():
             warn("Cancelled.")
             return
 
@@ -819,10 +819,10 @@ async def start_listener(config):
         warn("No accounts added yet. Use 'Add Account'.")
         return
 
-    picked = questionary.checkbox(
+    picked = await questionary.checkbox(
         "Run the listener for which account(s)?",
         choices=[Choice(p, value=p, checked=True) for p in accounts],
-    ).ask()
+    ).ask_async()
     if not picked:
         warn("No accounts selected.")
         return
@@ -890,7 +890,7 @@ async def main():
 
     while True:
         console.print()
-        choice = questionary.select(
+        choice = await questionary.select(
             "Main menu",
             choices=[
                 Choice("1. Add Account", value="add"),
@@ -902,7 +902,7 @@ async def main():
                 Choice("7. Remove Account", value="remove"),
                 Choice("8. Exit", value="exit"),
             ],
-        ).ask()
+        ).ask_async()
 
         if choice is None or choice == "exit":
             info("Goodbye.")
