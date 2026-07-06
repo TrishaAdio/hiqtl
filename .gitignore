@@ -1,0 +1,13 @@
+# Local credentials and sessions — never commit these
+config.json
+sessions/
+*.session
+*.session-journal
+captured_mentions.txt
+forward_log.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
