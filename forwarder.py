@@ -197,6 +197,70 @@ def build_client(account):
     )
 
 
+# -----------------------------------------------------------------------------
+# Persistent client pool — accounts stay connected & listening for the whole
+# session so /savead, mention capture and DM handling work while you use the
+# menu. Telethon processes updates in the background on the running event loop.
+# -----------------------------------------------------------------------------
+CLIENTS = {}                                  # phone -> connected TelegramClient
+LISTEN_STATE = {"reply": {}, "alert": {}}     # per-user cooldown tracking
+
+
+async def start_account(phone, account, config):
+    """Connect one account, register listener handlers, keep it live."""
+    if phone in CLIENTS and CLIENTS[phone].is_connected():
+        return CLIENTS[phone]
+    client = build_client(account)
+    await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        return None
+    me = await client.get_me()
+    register_handlers(client, config, me.id, LISTEN_STATE["reply"], LISTEN_STATE["alert"])
+    CLIENTS[phone] = client
+    return client
+
+
+async def start_all_accounts(config):
+    """Bring every saved account online and listening."""
+    accounts = config["accounts"]
+    if not accounts:
+        warn("No accounts yet. Use 'Add Account' — it will start listening immediately.")
+        return
+    f = config["features"]
+    info("Bringing accounts online...")
+    live = 0
+    for phone, acc in accounts.items():
+        try:
+            client = await start_account(phone, acc, config)
+            if client is None:
+                warn(f"{phone}: not logged in — re-add via 'Add Account'.")
+                continue
+            me = await client.get_me()
+            ok(f"Listening on {phone} (@{me.username or me.first_name}).")
+            live += 1
+        except Exception as e:
+            err(f"Could not start {phone}: {e}")
+    if live:
+        console.print(Panel(
+            f"[green]{live}[/green] account(s) online and listening for:\n"
+            f"  /savead in Saved Messages: {'on' if f['savead_enabled'] else 'off'}\n"
+            f"  mention capture:           {'on' if f['capture_mentions_enabled'] else 'off'}\n"
+            f"  DM auto-reply (1x):        {'on' if f['dm_autoreply_enabled'] else 'off'}\n"
+            f"  DM self-alert (x{config['settings']['dm_alert_count']}):        "
+            f"{'on' if f['dm_alert_enabled'] else 'off'}",
+            title="Listener active", style="green"))
+
+
+async def stop_all_accounts():
+    for client in list(CLIENTS.values()):
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    CLIENTS.clear()
+
+
 async def ask_int(prompt, current, lo, hi):
     raw = await questionary.text(f"{prompt} [{current}]:").ask_async()
     if raw is None or raw.strip() == "":
@@ -238,6 +302,7 @@ async def add_account(config):
     account = {"api_id": api_id, "api_hash": api_hash, "phone": phone}
     client = build_client(account)
 
+    ok_login = False
     try:
         await client.connect()
         if await client.is_user_authorized():
@@ -258,6 +323,7 @@ async def add_account(config):
         config["accounts"][phone] = account
         save_config(config)
         ok(f"Logged in as {display}. Session saved.")
+        ok_login = True
     except (PhoneCodeInvalidError, PhoneCodeExpiredError):
         err("The login code was invalid or expired. Try again.")
     except PhoneNumberInvalidError:
@@ -266,7 +332,15 @@ async def add_account(config):
         err(f"Telegram asked us to wait {e.seconds}s before trying again.")
     except Exception as e:
         err(f"Login failed: {e}")
-    finally:
+
+    if ok_login:
+        # Keep this account connected and start listening immediately.
+        me = await client.get_me()
+        register_handlers(client, config, me.id,
+                          LISTEN_STATE["reply"], LISTEN_STATE["alert"])
+        CLIENTS[phone] = client
+        ok(f"{phone} is now online and listening (/savead, DMs, mentions).")
+    else:
         await client.disconnect()
 
 
@@ -287,18 +361,15 @@ async def list_accounts(config):
     table.add_column("Status")
 
     for i, (phone, acc) in enumerate(accounts.items(), 1):
-        client = build_client(acc)
-        status = "[red]not logged in[/red]"
-        try:
-            await client.connect()
-            if await client.is_user_authorized():
+        status = "[red]not connected[/red]"
+        client = CLIENTS.get(phone)
+        if client is not None and client.is_connected():
+            try:
                 me = await client.get_me()
                 who = f"@{me.username}" if me.username else (me.first_name or "authorized")
-                status = f"[green]{who}[/green]"
-        except Exception:
-            status = "[yellow]unreachable[/yellow]"
-        finally:
-            await client.disconnect()
+                status = f"[green]listening: {who}[/green]"
+            except Exception:
+                status = "[yellow]connected[/yellow]"
 
         session_exists = os.path.exists(session_path_for(phone) + ".session")
         table.add_row(
@@ -329,6 +400,14 @@ async def remove_account(config):
         f"Remove {phone} and delete its local session file?", default=False
     ).ask_async():
         return
+
+    # Disconnect the live client first so the session file isn't locked.
+    client = CLIENTS.pop(phone, None)
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
     session_file = session_path_for(phone) + ".session"
     try:
@@ -555,7 +634,10 @@ async def forward_messages(config):
         warn("No accounts added yet. Use 'Add Account'.")
         return
     if not config["ads"]:
-        warn("No ads saved. Use /savead in Saved Messages, or 'Manage Ads'.")
+        warn("No ads saved yet. Add one first:")
+        console.print("   • In your Saved Messages, type [cyan]/savead your ad text[/cyan]")
+        console.print("   • Or reply to a message there with [cyan]/savead[/cyan] (keeps media)")
+        console.print("   • Or use menu option [cyan]3. Manage Ads[/cyan] -> Add a text ad")
         return
 
     phone = await questionary.select(
@@ -565,13 +647,16 @@ async def forward_messages(config):
     if not phone:
         return
 
-    client = build_client(accounts[phone])
-    try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            err("This account is not logged in. Re-add it via 'Add Account'.")
-            return
+    # Reuse the already-connected, listening client (do NOT open a second one).
+    client = CLIENTS.get(phone)
+    if client is None or not client.is_connected():
+        err(f"{phone} is not online. It should connect at startup — try re-adding it.")
+        return
+    if not await client.is_user_authorized():
+        err("This account is not logged in. Re-add it via 'Add Account'.")
+        return
 
+    try:
         # --- choose which ads to send ---
         ad_choice = await questionary.checkbox(
             "Select the ads to post (space to toggle, enter to confirm):",
@@ -638,8 +723,7 @@ async def forward_messages(config):
                              rounds, base_delay, round_delay, s["jitter"])
     except Exception as e:
         err(f"Forwarding error: {e}")
-    finally:
-        await client.disconnect()
+    # NOTE: never disconnect here — the client stays online and listening.
 
 
 async def run_forwarding(client, ads, selected_ids, id_to_title,
@@ -720,7 +804,7 @@ def register_handlers(client, config, own_id, reply_state, alert_state):
     texts = config["texts"]
     settings = config["settings"]
 
-    @client.on(events.NewMessage(chats="me", outgoing=True))
+    @client.on(events.NewMessage(chats=own_id, outgoing=True))
     async def on_saved(event):
         if not config["features"].get("savead_enabled"):
             return
@@ -813,61 +897,49 @@ def register_handlers(client, config, own_id, reply_state, alert_state):
                         await asyncio.sleep(delay)
 
 
-async def start_listener(config):
+async def listener_status(config):
+    """Show which accounts are live and what the listener is handling.
+
+    Listening is always-on: accounts connect at startup and keep processing
+    updates in the background while you use the menu. This view also lets you
+    (re)connect any account that isn't currently online.
+    """
     accounts = config["accounts"]
     if not accounts:
-        warn("No accounts added yet. Use 'Add Account'.")
-        return
-
-    picked = await questionary.checkbox(
-        "Run the listener for which account(s)?",
-        choices=[Choice(p, value=p, checked=True) for p in accounts],
-    ).ask_async()
-    if not picked:
-        warn("No accounts selected.")
+        warn("No accounts yet. Use 'Add Account' — it starts listening immediately.")
         return
 
     f = config["features"]
-    console.print(Panel(
-        f"Listener active features:\n"
-        f"  /savead capture:      {'on' if f['savead_enabled'] else 'off'}\n"
-        f"  mention capture:      {'on' if f['capture_mentions_enabled'] else 'off'}\n"
-        f"  DM auto-reply (1x):   {'on' if f['dm_autoreply_enabled'] else 'off'}\n"
-        f"  DM self-alert (x{config['settings']['dm_alert_count']}):  "
-        f"{'on' if f['dm_alert_enabled'] else 'off'}\n"
-        f"[dim]Press Ctrl+C to stop and return to the menu.[/dim]",
-        title="Live Listener", style="cyan"))
+    table = Table(title="Listener", header_style="bold cyan")
+    table.add_column("Account")
+    table.add_column("State")
+    offline = []
+    for phone in accounts:
+        client = CLIENTS.get(phone)
+        if client is not None and client.is_connected():
+            table.add_row(phone, "[green]online — listening[/green]")
+        else:
+            table.add_row(phone, "[red]offline[/red]")
+            offline.append(phone)
+    console.print(table)
+    console.print(
+        f"Handling: /savead [{'on' if f['savead_enabled'] else 'off'}]  •  "
+        f"mentions [{'on' if f['capture_mentions_enabled'] else 'off'}]  •  "
+        f"DM auto-reply [{'on' if f['dm_autoreply_enabled'] else 'off'}]  •  "
+        f"DM self-alert x{config['settings']['dm_alert_count']} "
+        f"[{'on' if f['dm_alert_enabled'] else 'off'}]")
 
-    clients = []
-    reply_state = {}
-    alert_state = {}
-    try:
-        for phone in picked:
-            client = build_client(accounts[phone])
-            await client.connect()
-            if not await client.is_user_authorized():
-                warn(f"{phone} is not logged in; skipping.")
-                await client.disconnect()
-                continue
-            me = await client.get_me()
-            register_handlers(client, config, me.id, reply_state, alert_state)
-            clients.append(client)
-            ok(f"Listening on {phone} (@{me.username or me.first_name}).")
-
-        if not clients:
-            warn("No logged-in accounts to listen on.")
-            return
-
-        info("Listener running. Ctrl+C to stop.")
-        await asyncio.gather(*(c.run_until_disconnected() for c in clients))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        info("Stopping listener...")
-    finally:
-        for c in clients:
+    if offline and await questionary.confirm(
+            f"Reconnect {len(offline)} offline account(s) now?", default=True).ask_async():
+        for phone in offline:
             try:
-                await c.disconnect()
-            except Exception:
-                pass
+                client = await start_account(phone, accounts[phone], config)
+                if client:
+                    ok(f"{phone} is back online and listening.")
+                else:
+                    warn(f"{phone}: not logged in — re-add via 'Add Account'.")
+            except Exception as e:
+                err(f"Could not reconnect {phone}: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -878,41 +950,47 @@ async def main():
     config = load_config()
     info(f"Loaded {len(config['accounts'])} account(s) and {len(config['ads'])} ad(s).")
 
+    # Bring every account online and listening immediately.
+    await start_all_accounts(config)
+
     actions = {
         "add": add_account,
         "forward": forward_messages,
         "ads": manage_ads,
-        "listen": start_listener,
+        "listen": listener_status,
         "list": list_accounts,
         "settings": edit_settings,
         "remove": remove_account,
     }
 
-    while True:
-        console.print()
-        choice = await questionary.select(
-            "Main menu",
-            choices=[
-                Choice("1. Add Account", value="add"),
-                Choice("2. Post Ads (copy-paste to selected chats)", value="forward"),
-                Choice("3. Manage Ads", value="ads"),
-                Choice("4. Start Listener (/savead, mentions, DM auto-reply)", value="listen"),
-                Choice("5. List Accounts", value="list"),
-                Choice("6. Settings", value="settings"),
-                Choice("7. Remove Account", value="remove"),
-                Choice("8. Exit", value="exit"),
-            ],
-        ).ask_async()
+    try:
+        while True:
+            console.print()
+            choice = await questionary.select(
+                "Main menu",
+                choices=[
+                    Choice("1. Add Account", value="add"),
+                    Choice("2. Post Ads (copy-paste to selected chats)", value="forward"),
+                    Choice("3. Manage Ads", value="ads"),
+                    Choice("4. Listener Status", value="listen"),
+                    Choice("5. List Accounts", value="list"),
+                    Choice("6. Settings", value="settings"),
+                    Choice("7. Remove Account", value="remove"),
+                    Choice("8. Exit", value="exit"),
+                ],
+            ).ask_async()
 
-        if choice is None or choice == "exit":
-            info("Goodbye.")
-            break
-        try:
-            await actions[choice](config)
-        except KeyboardInterrupt:
-            warn("Interrupted; returning to menu.")
-        except Exception as e:
-            err(f"Unexpected error: {e}")
+            if choice is None or choice == "exit":
+                info("Goodbye.")
+                break
+            try:
+                await actions[choice](config)
+            except KeyboardInterrupt:
+                warn("Interrupted; returning to menu.")
+            except Exception as e:
+                err(f"Unexpected error: {e}")
+    finally:
+        await stop_all_accounts()
 
 
 if __name__ == "__main__":
